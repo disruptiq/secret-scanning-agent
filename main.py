@@ -143,7 +143,11 @@ def scan_directory(directory):
                     file_findings = find_secrets_in_file(str(file_path), content)
                     findings.extend(file_findings)
                     if file_findings:
-                        logger.info(f"Found {len(file_findings)} secrets in {file_path}")
+                        # Group findings by confidence for better logging
+                        high_conf = sum(1 for f in file_findings if f.get('confidence') == 'high')
+                        medium_conf = sum(1 for f in file_findings if f.get('confidence') == 'medium')
+                        low_conf = sum(1 for f in file_findings if f.get('confidence') == 'low')
+                        logger.info(f"Found {len(file_findings)} secrets in {file_path} (high:{high_conf}, medium:{medium_conf}, low:{low_conf})")
                 scanned_files += 1
             except Exception as e:
                 logger.error(f"Error reading {file_path}: {e}")
@@ -194,8 +198,9 @@ def main():
         "external_tools": {},
         "summary": {
             "total_built_in_findings": 0,
+            "total_external_findings": 0,
             "tools_run": len(tools),
-            "scan_completed": False
+        "scan_completed": False
         }
     }
 
@@ -212,20 +217,45 @@ def main():
         for tool in tools:
             logger.info(f"Running {tool}...")
             output = run_external_tool(tool, directory)
-            # Try to parse JSON output for better formatting
+            # Try to parse output for better formatting
             parsed_output = output
-            try:
-                parsed_output = json.loads(output)
-            except json.JSONDecodeError:
-                pass  # Keep as string if not valid JSON
+            if output:
+                if tool == 'trufflehog':
+                    # Trufflehog outputs NDJSON (Newline Delimited JSON)
+                    try:
+                        parsed_output = []
+                        for line in output.strip().split('\n'):
+                            if line.strip():
+                                parsed_output.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass  # Keep as string if parsing fails
+                else:
+                    # Try to parse as single JSON object
+                    try:
+                        parsed_output = json.loads(output)
+                    except json.JSONDecodeError:
+                        pass  # Keep as string if not valid JSON
+
+            # Count findings for summary
+            finding_count = 0
+            if isinstance(parsed_output, list):
+                finding_count = len(parsed_output)
+            elif isinstance(parsed_output, dict) and 'results' in parsed_output:
+                # For detect-secrets format
+                finding_count = sum(len(findings) for findings in parsed_output['results'].values())
 
             scan_results["external_tools"][tool] = {
                 "raw_output": parsed_output,
                 "status": "completed" if output else "failed/no_output",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "findings_count": finding_count
             }
             if output:
                 external_outputs.append(f"\n--- {tool.upper()} OUTPUT ---\n{output}")
+
+    # Calculate total external findings
+    total_external = sum(tool_data.get('findings_count', 0) for tool_data in scan_results['external_tools'].values())
+    scan_results["summary"]["total_external_findings"] = total_external
 
     # Mark scan as completed
     scan_results["summary"]["scan_completed"] = True
@@ -269,6 +299,9 @@ def main():
     print(f"\n[SUMMARY] Scan Results:")
     print(f"   Directory: {directory}")
     print(f"   Built-in findings: {total_findings}")
+    if tools:
+        total_external = scan_results["summary"].get("total_external_findings", 0)
+        print(f"   External findings: {total_external}")
     print(f"   External tools: {len(tools)}")
     print(f"   Results saved to: {output_file}")
 
