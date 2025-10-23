@@ -6,13 +6,36 @@ import subprocess
 import argparse
 import logging
 import json
+import mmap
+import multiprocessing
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from logging.handlers import QueueHandler, QueueListener
 from patterns import find_secrets_in_file
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up asynchronous logging
+log_queue = multiprocessing.Queue()
+
+# Create a console handler for the queue listener
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Create the queue listener
+listener = QueueListener(log_queue, console_handler)
+listener.start()
+
+# Disable default logging and set up queue-based logging
+logging.getLogger().handlers.clear()
+logging.getLogger().addHandler(QueueHandler(log_queue))
+logging.getLogger().setLevel(logging.INFO)
+
+# Create a logger for this module
 logger = logging.getLogger(__name__)
+
+
 
 # External tools configuration
 EXTERNAL_TOOLS = {
@@ -46,8 +69,73 @@ def is_text_file(file_path):
             if b'\0' in chunk:
                 return False
         return True
-    except:
+    except (OSError, IOError):
+        # Handle file access errors gracefully
         return False
+
+def get_files_to_scan(directory):
+    """Get list of files to scan, preferring git ls-files for faster traversal."""
+    dir_path = Path(directory)
+
+    # Try to use git ls-files for faster file listing in git repos
+    try:
+        result = subprocess.run(['git', 'ls-files'], cwd=directory, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            git_files = [dir_path / f.strip() for f in result.stdout.strip().split('\n') if f.strip()]
+            logger.info(f"Using git ls-files: found {len(git_files)} tracked files")
+            return git_files
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Fallback to directory traversal
+    logger.info("Falling back to directory traversal")
+    exclude_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico',
+                         '.mp3', '.mp4', '.avi', '.mov', '.zip', '.tar', '.gz',
+                         '.exe', '.dll', '.so', '.dylib', '.pyc', '.class'}
+
+    files = []
+    for file_path in dir_path.rglob('*'):
+        if file_path.is_file() and file_path.suffix.lower() not in exclude_extensions:
+            files.append(file_path)
+
+    return files
+
+def scan_single_file(file_path):
+    """Scan a single file for secrets (used by multiprocessing workers)."""
+    findings = []
+
+    try:
+        if not is_text_file(str(file_path)):
+            return []
+
+        # Get file size
+        file_size = os.path.getsize(file_path)
+
+        # Skip files larger than 50MB to prevent memory issues
+        if file_size > 50 * 1024 * 1024:
+            return []
+
+        # Read file content using mmap for better performance
+        try:
+            with open(file_path, 'rb') as f:
+                # Use mmap for memory-mapped file access
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    # Decode bytes to string, ignoring encoding errors
+                    content = mm.read().decode('utf-8', errors='ignore')
+        except (OSError, IOError, UnicodeDecodeError, ValueError) as e:
+            # Handle file reading errors, fallback to regular reading
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except (OSError, IOError, UnicodeDecodeError) as e:
+                return {'error': f'File read error: {str(e)}', 'file': str(file_path)}
+
+        file_findings = find_secrets_in_file(str(file_path), content)
+        return file_findings
+
+    except Exception as e:
+        # Return error info instead of logging in worker
+        return {'error': str(e), 'file': str(file_path)}
 
 def run_external_tool(tool_name, directory):
     """Run an external secret scanning tool"""
@@ -82,7 +170,11 @@ def run_external_tool(tool_name, directory):
             'NO_UPDATE': '1',
             'DISABLE_AUTO_UPDATE': '1'
         })
-        result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=300)  # 5 minute timeout
+        except subprocess.TimeoutExpired:
+            logger.error(f"{tool_name} timed out after 5 minutes")
+            return ""
 
         # Check if we got any useful output despite errors
         stdout_content = result.stdout.strip() if result.stdout else ""
@@ -107,54 +199,90 @@ def run_external_tool(tool_name, directory):
         return ""
 
 def scan_directory(directory):
-    """Scan a directory for potential secrets"""
+    """Scan a directory for potential secrets using multiprocessing"""
     logger.info(f"Starting directory scan: {directory}")
-    findings = []
     dir_path = Path(directory)
 
     if not dir_path.exists():
         logger.error(f"Directory '{directory}' does not exist.")
-        return findings
+        return []
 
     logger.info(f"Scanning directory: {directory}")
 
-    # Find all files, excluding common binary extensions
-    exclude_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico',
-                         '.mp3', '.mp4', '.avi', '.mov', '.zip', '.tar', '.gz',
-                         '.exe', '.dll', '.so', '.dylib', '.pyc', '.class'}
+    # Timing: File discovery
+    start_time = time.time()
+    files_to_scan = get_files_to_scan(directory)
+    file_discovery_time = time.time() - start_time
 
-    total_files = 0
+    total_files = len(files_to_scan)
+
+    if not files_to_scan:
+        logger.info("No files to scan")
+        return []
+
+    logger.info(f"Found {total_files} files to scan in {file_discovery_time:.2f}s")
+
+    # Determine number of worker processes (use CPU count - 1, minimum 1)
+    num_workers = max(1, multiprocessing.cpu_count() - 1)
+    logger.info(f"Using {num_workers} worker processes for parallel scanning")
+
+    findings = []
     scanned_files = 0
 
-    for file_path in dir_path.rglob('*'):
-        if file_path.is_file():
-            total_files += 1
-            if file_path.suffix.lower() in exclude_extensions:
-                logger.debug(f"Skipping binary file: {file_path}")
-                continue
-            if not is_text_file(file_path):
-                logger.debug(f"Skipping non-text file: {file_path}")
-                continue
+    # Timing: Multiprocessing scan
+    scan_start_time = time.time()
 
+    # Use ProcessPoolExecutor for multiprocessing
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        logger.info(f"Submitting {len(files_to_scan)} tasks to worker pool...")
+        # Submit all tasks
+        future_to_file = {executor.submit(scan_single_file, file_path): file_path for file_path in files_to_scan}
+        logger.info(f"All {len(future_to_file)} tasks submitted, waiting for completion...")
+
+        # Collect results as they complete
+        completed_count = 0
+        for future in as_completed(future_to_file):
+            completed_count += 1
+            file_path = future_to_file[future]
+            logger.debug(f"Processing result {completed_count}/{len(future_to_file)} for {file_path}")
             try:
-                logger.debug(f"Scanning file: {file_path}")
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                    file_findings = find_secrets_in_file(str(file_path), content)
-                    findings.extend(file_findings)
-                    if file_findings:
-                        # Group findings by confidence for better logging
-                        high_conf = sum(1 for f in file_findings if f.get('confidence') == 'high')
-                        medium_conf = sum(1 for f in file_findings if f.get('confidence') == 'medium')
-                        low_conf = sum(1 for f in file_findings if f.get('confidence') == 'low')
-                        logger.info(f"Found {len(file_findings)} secrets in {file_path} (high:{high_conf}, medium:{medium_conf}, low:{low_conf})")
+                result = future.result()
                 scanned_files += 1
-            except Exception as e:
-                logger.error(f"Error reading {file_path}: {e}")
-                continue
 
+                if isinstance(result, dict) and 'error' in result:
+                    # Handle error from worker
+                    logger.error(f"Error reading {result['file']}: {result['error']}")
+                elif isinstance(result, list):
+                    # Normal findings
+                    findings.extend(result)
+                    if result:
+                        # Group findings by confidence for better logging
+                        high_conf = sum(1 for f in result if f.get('confidence') == 'high')
+                        medium_conf = sum(1 for f in result if f.get('confidence') == 'medium')
+                        low_conf = sum(1 for f in result if f.get('confidence') == 'low')
+                        logger.info(f"Found {len(result)} secrets in {file_path} (high:{high_conf}, medium:{medium_conf}, low:{low_conf})")
+
+                # Progress logging every 100 files
+                if scanned_files % 100 == 0:
+                    logger.info(f"Progress: {scanned_files}/{total_files} files scanned, {len(findings)} findings so far")
+
+            except Exception as e:
+                logger.error(f"Error processing {file_path}: {e}")
+                scanned_files += 1
+
+        logger.info(f"All {completed_count} tasks completed")
+
+    scan_time = time.time() - scan_start_time
     logger.info(f"Scan complete: {scanned_files}/{total_files} files scanned, {len(findings)} findings")
-    return findings
+
+    # Return both findings and timing stats
+    return findings, {
+        'file_discovery_time': file_discovery_time,
+        'scan_time': scan_time,
+        'total_files': total_files,
+        'scanned_files': scanned_files,
+        'findings_count': len(findings)
+    }
 
 def main():
     logger.info("Secret Scanning Agent started")
@@ -206,17 +334,31 @@ def main():
 
     # Run built-in regex scan
     logger.info("Starting built-in regex scan...")
-    findings = scan_directory(directory)
+    scan_result = scan_directory(directory)
+
+    # Handle the new return format (findings + timing stats)
+    if isinstance(scan_result, tuple):
+        findings, scan_stats = scan_result
+    else:
+        # Backward compatibility
+        findings = scan_result
+        scan_stats = {'file_discovery_time': 0, 'scan_time': 0, 'total_files': 0, 'scanned_files': 0, 'findings_count': len(findings)}
+
     scan_results["built_in_findings"] = findings
     scan_results["summary"]["total_built_in_findings"] = len(findings)
 
     # Run external tools
     external_outputs = []
+    external_tool_times = {}
     if tools:
         logger.info(f"Running {len(tools)} external scanning tools...")
         for tool in tools:
             logger.info(f"Running {tool}...")
+            tool_start_time = time.time()
             output = run_external_tool(tool, directory)
+            tool_time = time.time() - tool_start_time
+            external_tool_times[tool] = tool_time
+
             # Try to parse output for better formatting
             parsed_output = output
             if output:
@@ -248,7 +390,8 @@ def main():
                 "raw_output": parsed_output,
                 "status": "completed" if output else "failed/no_output",
                 "timestamp": datetime.now().isoformat(),
-                "findings_count": finding_count
+                "findings_count": finding_count,
+                "execution_time": tool_time
             }
             if output:
                 external_outputs.append(f"\n--- {tool.upper()} OUTPUT ---\n{output}")
@@ -304,6 +447,27 @@ def main():
         print(f"   External findings: {total_external}")
     print(f"   External tools: {len(tools)}")
     print(f"   Results saved to: {output_file}")
+
+    # Display performance statistics
+    print(f"\n[PERFORMANCE] Timing Statistics:")
+    print(f"   File Discovery: {scan_stats['file_discovery_time']:.2f}s")
+    print(f"   Built-in Scan: {scan_stats['scan_time']:.2f}s ({scan_stats['scanned_files']}/{scan_stats['total_files']} files)")
+    print(f"   Files per second: {scan_stats['scanned_files']/scan_stats['scan_time']:.1f}" if scan_stats['scan_time'] > 0 else "   Files per second: N/A")
+
+    if tools:
+        total_external_time = sum(external_tool_times.values())
+        print(f"   External Tools: {total_external_time:.2f}s")
+        for tool, tool_time in external_tool_times.items():
+            print(f"     - {tool}: {tool_time:.2f}s")
+
+        total_time = scan_stats['file_discovery_time'] + scan_stats['scan_time'] + total_external_time
+        print(f"   Total Time: {total_time:.2f}s")
+    else:
+        total_time = scan_stats['file_discovery_time'] + scan_stats['scan_time']
+        print(f"   Total Time: {total_time:.2f}s")
+
+    # Clean up logging listener
+    listener.stop()
 
 if __name__ == "__main__":
     main()
