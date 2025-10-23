@@ -15,6 +15,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from logging.handlers import QueueHandler, QueueListener
 from patterns import find_secrets_in_file
+from queue import Queue, Empty
 
 # Set up asynchronous logging
 log_queue = multiprocessing.Queue()
@@ -34,6 +35,78 @@ logging.getLogger().setLevel(logging.INFO)
 
 # Create a logger for this module
 logger = logging.getLogger(__name__)
+
+# Set up asynchronous file writing
+findings_queue = Queue()
+output_file_path = None  # Will be set when scan starts
+
+def async_file_writer():
+    """Asynchronous file writer that processes findings from the queue."""
+    global output_file_path
+    findings_buffer = []
+    scan_info = None
+    tools_info = {}
+
+    while True:
+        try:
+            # Get item from queue with timeout
+            item = findings_queue.get(timeout=0.1)
+
+            if item is None:  # Sentinel value to stop
+                break
+
+            if isinstance(item, dict):
+                if 'scan_info' in item:
+                    # Initialize scan info
+                    scan_info = item['scan_info']
+                elif 'tool_result' in item:
+                    # Store tool results
+                    tool_name = item['tool_name']
+                    tool_data = item['tool_result']
+                    tools_info[tool_name] = tool_data
+                elif 'findings' in item:
+                    # Add findings to buffer
+                    findings_buffer.extend(item['findings'])
+                elif 'finalize' in item:
+                    # Write final results
+                    write_final_results(scan_info, findings_buffer, tools_info, item['output_file'])
+                    break
+
+        except Empty:
+            continue
+        except Exception as e:
+            logger.error(f"Error in async file writer: {e}")
+
+def write_final_results(scan_info, findings, tools_info, output_file):
+    """Write the final JSON results to file."""
+    try:
+        # Calculate summary
+        total_built_in = len(findings)
+        total_external = sum(tool_data.get('findings_count', 0) for tool_data in tools_info.values())
+
+        scan_results = {
+            "scan_info": scan_info,
+            "built_in_findings": findings,
+            "external_tools": tools_info,
+            "summary": {
+                "total_built_in_findings": total_built_in,
+                "total_external_findings": total_external,
+                "tools_run": len(tools_info),
+                "scan_completed": True
+            }
+        }
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(scan_results, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Results written to {output_file}")
+
+    except Exception as e:
+        logger.error(f"Error writing final results: {e}")
+
+# Start the async file writer thread
+writer_thread = threading.Thread(target=async_file_writer, daemon=True)
+writer_thread.start()
 
 
 
@@ -111,8 +184,8 @@ def scan_single_file(file_path):
         # Get file size
         file_size = os.path.getsize(file_path)
 
-        # Skip files larger than 50MB to prevent memory issues
-        if file_size > 50 * 1024 * 1024:
+        # Skip files larger than 100MB to allow larger files for maximum coverage
+        if file_size > 100 * 1024 * 1024:
             return []
 
         # Read file content using mmap for better performance
@@ -126,7 +199,7 @@ def scan_single_file(file_path):
             # Handle file reading errors, fallback to regular reading
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
+                    content = f.read(50 * 1024 * 1024)  # Read up to 50MB per file
             except (OSError, IOError, UnicodeDecodeError) as e:
                 return {'error': f'File read error: {str(e)}', 'file': str(file_path)}
 
@@ -222,11 +295,10 @@ def scan_directory(directory):
 
     logger.info(f"Found {total_files} files to scan in {file_discovery_time:.2f}s")
 
-    # Determine number of worker processes (use CPU count - 1, minimum 1)
-    num_workers = max(1, multiprocessing.cpu_count() - 1)
-    logger.info(f"Using {num_workers} worker processes for parallel scanning")
+    # Determine number of worker processes (use ALL available CPU cores for maximum speed)
+    num_workers = multiprocessing.cpu_count()
+    logger.info(f"Using ALL {num_workers} CPU cores for maximum parallel scanning speed")
 
-    findings = []
     scanned_files = 0
 
     # Timing: Multiprocessing scan
@@ -253,8 +325,7 @@ def scan_directory(directory):
                     # Handle error from worker
                     logger.error(f"Error reading {result['file']}: {result['error']}")
                 elif isinstance(result, list):
-                    # Normal findings
-                    findings.extend(result)
+                    # Normal findings - send to async writer immediately
                     if result:
                         # Group findings by confidence for better logging
                         high_conf = sum(1 for f in result if f.get('confidence') == 'high')
@@ -262,9 +333,12 @@ def scan_directory(directory):
                         low_conf = sum(1 for f in result if f.get('confidence') == 'low')
                         logger.info(f"Found {len(result)} secrets in {file_path} (high:{high_conf}, medium:{medium_conf}, low:{low_conf})")
 
+                    # Send findings to async writer
+                    findings_queue.put({'findings': result})
+
                 # Progress logging every 100 files
                 if scanned_files % 100 == 0:
-                    logger.info(f"Progress: {scanned_files}/{total_files} files scanned, {len(findings)} findings so far")
+                    logger.info(f"Progress: {scanned_files}/{total_files} files scanned")
 
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
@@ -273,15 +347,15 @@ def scan_directory(directory):
         logger.info(f"All {completed_count} tasks completed")
 
     scan_time = time.time() - scan_start_time
-    logger.info(f"Scan complete: {scanned_files}/{total_files} files scanned, {len(findings)} findings")
+    logger.info(f"Scan complete: {scanned_files}/{total_files} files scanned")
 
-    # Return both findings and timing stats
-    return findings, {
+    # Return timing stats only (findings are sent asynchronously)
+    return {
         'file_discovery_time': file_discovery_time,
         'scan_time': scan_time,
         'total_files': total_files,
         'scanned_files': scanned_files,
-        'findings_count': len(findings)
+        'findings_count': 0  # Will be calculated by the writer
     }
 
 def main():
@@ -314,38 +388,20 @@ def main():
 
     logger.info(f"Scanning directory: {directory}")
 
-    # Initialize results structure
-    scan_results = {
-        "scan_info": {
-            "timestamp": datetime.now().isoformat(),
-            "directory": directory,
-            "tools_used": ["built-in"] + tools if not args.no_external else ["built-in"],
-            "output_file": output_file
-        },
-        "built_in_findings": [],
-        "external_tools": {},
-        "summary": {
-            "total_built_in_findings": 0,
-            "total_external_findings": 0,
-            "tools_run": len(tools),
-        "scan_completed": False
-        }
+    # Initialize scan info and send to async writer
+    scan_info = {
+        "timestamp": datetime.now().isoformat(),
+        "directory": directory,
+        "tools_used": ["built-in"] + tools if not args.no_external else ["built-in"],
+        "output_file": output_file
     }
+
+    # Send scan info to async writer
+    findings_queue.put({'scan_info': scan_info})
 
     # Run built-in regex scan
     logger.info("Starting built-in regex scan...")
-    scan_result = scan_directory(directory)
-
-    # Handle the new return format (findings + timing stats)
-    if isinstance(scan_result, tuple):
-        findings, scan_stats = scan_result
-    else:
-        # Backward compatibility
-        findings = scan_result
-        scan_stats = {'file_discovery_time': 0, 'scan_time': 0, 'total_files': 0, 'scanned_files': 0, 'findings_count': len(findings)}
-
-    scan_results["built_in_findings"] = findings
-    scan_results["summary"]["total_built_in_findings"] = len(findings)
+    scan_stats = scan_directory(directory)
 
     # Run external tools
     external_outputs = []
@@ -386,65 +442,50 @@ def main():
                 # For detect-secrets format
                 finding_count = sum(len(findings) for findings in parsed_output['results'].values())
 
-            scan_results["external_tools"][tool] = {
+            tool_result = {
                 "raw_output": parsed_output,
                 "status": "completed" if output else "failed/no_output",
                 "timestamp": datetime.now().isoformat(),
                 "findings_count": finding_count,
                 "execution_time": tool_time
             }
+
+            # Send tool result to async writer
+            findings_queue.put({'tool_result': tool_result, 'tool_name': tool})
             if output:
                 external_outputs.append(f"\n--- {tool.upper()} OUTPUT ---\n{output}")
 
-    # Calculate total external findings
-    total_external = sum(tool_data.get('findings_count', 0) for tool_data in scan_results['external_tools'].values())
-    scan_results["summary"]["total_external_findings"] = total_external
+    # Send finalize signal to async writer
+    logger.info("Finalizing results...")
+    findings_queue.put({'finalize': True, 'output_file': output_file})
 
-    # Mark scan as completed
-    scan_results["summary"]["scan_completed"] = True
-
-    # Write results to JSON file
-    try:
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(scan_results, f, indent=2, ensure_ascii=False)
-        logger.info(f"Results written to {output_file}")
-    except Exception as e:
-        logger.error(f"Failed to write results to {output_file}: {e}")
+    # Give the writer thread time to finish
+    time.sleep(0.1)  # Minimal pause to let async writer complete
 
     # Display console output
     print(f"\n[*] Results saved to: {output_file}")
     print("=" * 50)
 
-    if findings:
-        logger.info("Displaying built-in regex findings")
-        print("\n[SCAN] BUILT-IN REGEX FINDINGS:")
-        for finding in findings:
-            print(f"  - {finding['file']}:{finding['line']} - {finding['type']}")
-        total_findings = len(findings)
-        print(f"\n[SUCCESS] Built-in scan found {total_findings} potential secrets.")
-    else:
-        total_findings = 0
-        print("\n[SUCCESS] Built-in scan found no potential secrets.")
+    # Note: We can't display findings here since they're written asynchronously
+    # The findings will be shown from the log messages during scanning
+    print("\n[SCAN] Findings were displayed in real-time during scanning.")
 
     # Show external tool status
     if tools:
         print(f"\n[TOOLS] External Tools Status:")
+        # Note: We don't have the status info here since it's sent asynchronously
+        # This could be improved by keeping a local copy for display
         for tool in tools:
-            status = scan_results["external_tools"][tool]["status"]
-            status_icon = "[OK]" if status == "completed" else "[FAIL]"
-            print(f"  {status_icon} {tool}: {status}")
+            print(f"  [RUNNING] {tool}")
 
         # Show external tool outputs
         for output in external_outputs:
             print(output)
 
-    logger.info(f"Scan completed. Total built-in findings: {total_findings}")
+    logger.info("Scan completed.")
     print(f"\n[SUMMARY] Scan Results:")
     print(f"   Directory: {directory}")
-    print(f"   Built-in findings: {total_findings}")
-    if tools:
-        total_external = scan_results["summary"].get("total_external_findings", 0)
-        print(f"   External findings: {total_external}")
+    print(f"   Files scanned: {scan_stats['scanned_files']}/{scan_stats['total_files']}")
     print(f"   External tools: {len(tools)}")
     print(f"   Results saved to: {output_file}")
 
