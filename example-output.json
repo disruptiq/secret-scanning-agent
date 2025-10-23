@@ -1,0 +1,269 @@
+{
+  "scan_info": {
+    "timestamp": "2025-10-22T18:28:39.698699",
+    "directory": "test-secrets",
+    "tools_used": [
+      "built-in",
+      "trufflehog",
+      "gitleaks",
+      "detect-secrets",
+      "secretlint"
+    ],
+    "output_file": "output.json"
+  },
+  "built_in_findings": [
+    {
+      "file": "test-secrets\\.env",
+      "line": 1,
+      "type": "AWS Access Key",
+      "match": "AKIAIOSFODNN7EXAMPLE"
+    },
+    {
+      "file": "test-secrets\\.env",
+      "line": 2,
+      "type": "AWS Secret Key",
+      "match": "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    },
+    {
+      "file": "test-secrets\\.env",
+      "line": 4,
+      "type": "GitHub Token",
+      "match": "ghp_1234567890abcdef1234567890abcdef1234"
+    },
+    {
+      "file": "test-secrets\\.env",
+      "line": 5,
+      "type": "Database Password",
+      "match": "password"
+    },
+    {
+      "file": "test-secrets\\config.js",
+      "line": 2,
+      "type": "Stripe Secret Key",
+      "match": "sk_live_4eC39HqLyjWDarjtT1zdp7dc"
+    },
+    {
+      "file": "test-secrets\\config.js",
+      "line": 3,
+      "type": "Google API Key",
+      "match": "AIzaSyDdI0hCZtE6vySjsdfMm-WEfRq3CPzqKqq"
+    },
+    {
+      "file": "test-secrets\\config.js",
+      "line": 4,
+      "type": "Database Password",
+      "match": "Password"
+    }
+  ],
+  "external_tools": {
+    "trufflehog": {
+      "raw_output": {
+        "SourceMetadata": {
+          "Data": {
+            "Filesystem": {
+              "file": "test-secrets\\config.js",
+              "line": 2
+            }
+          }
+        },
+        "SourceID": 1,
+        "SourceType": 15,
+        "SourceName": "trufflehog - filesystem",
+        "DetectorType": 16,
+        "DetectorName": "Stripe",
+        "DetectorDescription": "Stripe is a payment processing platform. Stripe API keys can be used to interact with Stripe's services for processing payments, managing subscriptions, and more.",
+        "DecoderName": "PLAIN",
+        "Verified": false,
+        "VerificationFromCache": false,
+        "Raw": "sk_live_4eC39HqLyjWDarjtT1zdp7dc",
+        "RawV2": "",
+        "Redacted": "",
+        "ExtraData": {
+          "rotation_guide": "https://howtorotate.com/docs/tutorials/stripe/"
+        },
+        "StructuredData": null
+      },
+      "status": "completed",
+      "timestamp": "2025-10-22T18:28:45.934806"
+    },
+    "gitleaks": {
+      "raw_output": "",
+      "status": "failed/no_output",
+      "timestamp": "2025-10-22T18:28:45.957809"
+    },
+    "detect-secrets": {
+      "raw_output": {
+        "version": "1.5.0",
+        "plugins_used": [
+          {
+            "name": "ArtifactoryDetector"
+          },
+          {
+            "name": "AWSKeyDetector"
+          },
+          {
+            "name": "AzureStorageKeyDetector"
+          },
+          {
+            "name": "Base64HighEntropyString",
+            "limit": 4.5
+          },
+          {
+            "name": "BasicAuthDetector"
+          },
+          {
+            "name": "CloudantDetector"
+          },
+          {
+            "name": "DiscordBotTokenDetector"
+          },
+          {
+            "name": "GitHubTokenDetector"
+          },
+          {
+            "name": "GitLabTokenDetector"
+          },
+          {
+            "name": "HexHighEntropyString",
+            "limit": 3.0
+          },
+          {
+            "name": "IbmCloudIamDetector"
+          },
+          {
+            "name": "IbmCosHmacDetector"
+          },
+          {
+            "name": "IPPublicDetector"
+          },
+          {
+            "name": "JwtTokenDetector"
+          },
+          {
+            "name": "KeywordDetector",
+            "keyword_exclude": ""
+          },
+          {
+            "name": "MailchimpDetector"
+          },
+          {
+            "name": "NpmDetector"
+          },
+          {
+            "name": "OpenAIDetector"
+          },
+          {
+            "name": "PrivateKeyDetector"
+          },
+          {
+            "name": "PypiTokenDetector"
+          },
+          {
+            "name": "SendGridDetector"
+          },
+          {
+            "name": "SlackDetector"
+          },
+          {
+            "name": "SoftlayerDetector"
+          },
+          {
+            "name": "SquareOAuthDetector"
+          },
+          {
+            "name": "StripeDetector"
+          },
+          {
+            "name": "TelegramBotTokenDetector"
+          },
+          {
+            "name": "TwilioKeyDetector"
+          }
+        ],
+        "filters_used": [
+          {
+            "path": "detect_secrets.filters.allowlist.is_line_allowlisted"
+          },
+          {
+            "path": "detect_secrets.filters.common.is_ignored_due_to_verification_policies",
+            "min_level": 2
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_indirect_reference"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_likely_id_string"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_lock_file"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_not_alphanumeric_string"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_potential_uuid"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_prefixed_with_dollar_sign"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_sequential_string"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_swagger_file"
+          },
+          {
+            "path": "detect_secrets.filters.heuristic.is_templated_secret"
+          }
+        ],
+        "results": {
+          "test-secrets\\.env": [
+            {
+              "type": "GitHub Token",
+              "filename": "test-secrets\\.env",
+              "hashed_secret": "e175c6f5f2a92e8623bd9a4820edb4e8c1b0fd10",
+              "is_verified": false,
+              "line_number": 4
+            }
+          ],
+          "test-secrets\\config.js": [
+            {
+              "type": "Base64 High Entropy String",
+              "filename": "test-secrets\\config.js",
+              "hashed_secret": "891a58077e6f5753b8838bf4f865a7de32b60440",
+              "is_verified": false,
+              "line_number": 2
+            },
+            {
+              "type": "Base64 High Entropy String",
+              "filename": "test-secrets\\config.js",
+              "hashed_secret": "d2559b5f22804a9ccd68dda9becde64e79bf9f02",
+              "is_verified": false,
+              "line_number": 3
+            },
+            {
+              "type": "Secret Keyword",
+              "filename": "test-secrets\\config.js",
+              "hashed_secret": "5f8434ea323e4ad03f901b7cd885f727b5021781",
+              "is_verified": false,
+              "line_number": 4
+            }
+          ]
+        },
+        "generated_at": "2025-10-22T12:58:49Z"
+      },
+      "status": "completed",
+      "timestamp": "2025-10-22T18:28:49.686733"
+    },
+    "secretlint": {
+      "raw_output": "",
+      "status": "failed/no_output",
+      "timestamp": "2025-10-22T18:28:49.696897"
+    }
+  },
+  "summary": {
+    "total_built_in_findings": 7,
+    "tools_run": 4,
+    "scan_completed": true
+  }
+}
