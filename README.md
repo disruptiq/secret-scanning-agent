@@ -38,6 +38,47 @@ The agent can use popular secret scanning tools for enhanced detection. Currentl
 - ✅ **Detect-Secrets**: `pip install detect-secrets` (working)
 - ❌ **Secretlint**: `npm install -g secretlint @secretlint/secretlint-rule-preset-recommend` (path issues)
 
+## Configuration
+
+The agent can be configured via `config.json` file. Create this file in the same directory as the agent.
+
+### Configuration Parameters
+
+- **`isActive`** (boolean): Enable/disable the entire secret scanning functionality
+  - `true`: Enable scanning (default)
+  - `false`: Disable all scanners and return disabled status
+
+### Example config.json
+
+```json
+{
+  "isActive": true,
+  "description": "Set to true to enable secret scanning functionality, false to disable all scanners",
+  "scanner": {
+    "max_file_size_mb": 100,
+    "use_multiprocessing": true,
+    "log_level": "INFO"
+  },
+  "output": {
+    "format": "json",
+    "include_timestamps": true
+  }
+}
+```
+
+### Disabled Mode
+
+When `isActive` is set to `false`, the agent will:
+- Skip all scanning operations
+- Return a disabled status in the output file
+- Display a warning message to the user
+
+```bash
+python main.py /path/to/project
+# ⚠️  Secret Scanning Agent is DISABLED via configuration.
+#    Set 'isActive': true in config.json to enable scanning.
+```
+
 ## Usage
 
 ### Default Mode (All Tools)
@@ -235,8 +276,13 @@ python main.py test-secrets
 
 ```
 Secret Scanning Agent
-├── main.py (CLI interface and tool orchestration)
+├── main.py (CLI interface and orchestration)
+├── logger.py (Asynchronous logging setup)
+├── scanner.py (Core scanning logic and multiprocessing)
+├── tools.py (External tools configuration and execution)
+├── output.py (Asynchronous file writing and results)
 ├── patterns.py (Built-in regex patterns)
+├── config.json (Configuration file)
 ├── test-secrets/ (Test data with dummy secrets)
 └── External Tools (optional)
     ├── TruffleHog

@@ -1,0 +1,21 @@
+{
+  "scannerActive": true,
+  "description": "scannerActive: Set to true to enable secret scanning functionality, false to disable all scanners",
+  "isActive": {
+    "description": "Control which scanners are active. Set scanner name to true to enable, false to disable. 'built-in' is the regex-based scanner. Tools not listed are enabled by default.",
+    "built-in": false,
+    "trufflehog": true,
+    "gitleaks": true,
+    "detect-secrets": false,
+    "secretlint": true
+  },
+  "scanner": {
+    "max_file_size_mb": 100,
+    "use_multiprocessing": true,
+    "log_level": "INFO"
+  },
+  "output": {
+    "format": "json",
+    "include_timestamps": true
+  }
+}
